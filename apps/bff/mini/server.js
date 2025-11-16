@@ -815,6 +815,38 @@ async function loadPersona(cardId) {
   }
 }
 
+function summarizePersonaData(personaData) {
+  if (!personaData || typeof personaData !== "object") return null;
+  const lines = [];
+  if (personaData.name && typeof personaData.name === "string") {
+    lines.push(`Name: ${personaData.name}`);
+  }
+  if (personaData.persona) {
+    if (typeof personaData.persona === "string") {
+      lines.push(`Persona: ${personaData.persona}`);
+    } else if (typeof personaData.persona === "object") {
+      lines.push(`Persona: ${JSON.stringify(personaData.persona, null, 2)}`);
+    }
+  }
+  if (personaData.system && typeof personaData.system === "string") {
+    lines.push(`System: ${personaData.system}`);
+  }
+  if (personaData.description && typeof personaData.description === "string") {
+    lines.push(`Description: ${personaData.description}`);
+  }
+  if (personaData.system_behavior && typeof personaData.system_behavior === "object") {
+    lines.push(`System Behavior: ${JSON.stringify(personaData.system_behavior, null, 2)}`);
+  }
+  if (lines.length === 0) {
+    try {
+      return JSON.stringify(personaData, null, 2);
+    } catch {
+      return null;
+    }
+  }
+  return lines.join("\n");
+}
+
 function buildPrompt({ soulCoreFiles, personaPrompt, personaData, userPrompt }) {
   const soulCoreText = Array.isArray(soulCoreFiles) && soulCoreFiles.length > 0
     ? soulCoreFiles
@@ -826,10 +858,12 @@ ${file.content}`)
   instructions.push(
     "あなたは次のキャラクターとして話します。キャラの性格・口調・世界観・仕草を必ず反映し、“その人が喋っている”ように返答してください。",
   );
+  const personaSummary = summarizePersonaData(personaData);
   if (personaData) {
     instructions.push(`【V2カード情報】
-${JSON.stringify(personaData, null, 2)}`);
-  } else if (personaPrompt) {
+${personaSummary || JSON.stringify(personaData, null, 2)}`);
+  } 
+  if (!personaData && personaPrompt) {
     instructions.push(`【参考ペルソナ情報】
 ${personaPrompt}`);
   }

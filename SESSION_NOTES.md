@@ -26,6 +26,12 @@
 - ログ/スクショ: `logs/bff.*.log` に health probe の結果が出力される（失敗時）。CI/cron で `scripts/check_playability.sh` を 5 分間隔で実行し、Slack/メールへ通知する運用を推奨。
 - 次やること: Cloud Run 環境変数に `PUBLIC_UI_URL` と `PUBLIC_BFF_URL` を必ず設定し、`status/probe` が本番 URL を監視できるようにする。CI/CD へ `scripts/check_prod_build.sh && scripts/check_playability.sh` を必須ステップとして組み込む。
 
+## 2025-11-15 External Tester Success & Security “奉納の儀式”
+- やったこと: 外部テスターが初めて Cloud Run BFF に成功接続し、UI も正常応答を確認。「セキュリティ神殿の奉納の儀式」= 双方で環境変数/IAM/エンドポイント設定を突き合わせたことが決め手となり、500/404 から復旧し第三者環境でも通ることを証明。
+- 気づき/問題: セキュリティ層（IAMロール、正しいモデル名・エンドポイント、ENVの正名）を外すとコードが合っていても BFF は沈黙する。特に `models/` 付きモデル名や Gemini エンドポイント不一致は致命。設定突合せを怠ると再発する。
+- ログ/スクショ: Cloud Run 正常リビジョンの連続 200 ログ（wallet/balance, chat/v1）、ENV ログ（`[ENV] provider configuration`, `GEMINI_MODEL`, `GEMINI_ENDPOINT`）で確認可能。
+- 次やること: ソウルコア調整・UI/エラー表示の改善フェーズへ移行。フィードバック収集導線（簡易アンケートや通知バー）を検討。
+
 ## 2025-11-06 IZAKAYA マネージャー制度宣言
 - やったこと: `docs/IZAKAYA_MANAGER_PROTOCOL.md` を追加し、Vertex AI 常駐の「IZAKAYAマネージャー」が開発AI・企画AIを束ねて総合点検を実施するプロセスを正式化。RUNBOOK に項目を追記し、オンライン公開後の最終責任と報告ルートを明示。
 - 気づき/問題: 誰が点検提案を出し、顧客苦情に対して誰が一次回答するかが曖昧だった。マネージャー制度と点検レポートテンプレを定義することで責任の境界と行動手順を固定化。
