@@ -52,6 +52,11 @@ npm run dev
 npm run build # dist/ 出力（Docker/Nginx 用）
 # dev サーバーは `http://localhost:5174/preview/` 固定。ポート衝突時に自動で逃げない。
 
+# Verse UI (New Frontend)
+cd apps/frontend/verse-ui
+npm install
+npm run dev   # 固定ポート: http://localhost:1398/verse/
+
 # Mini BFF（正規バックエンド）
 cd apps/bff/mini
 npm install
