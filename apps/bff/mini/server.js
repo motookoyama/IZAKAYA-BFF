@@ -7,6 +7,43 @@ import { promises as fs } from "fs";
 import path from "path";
 
 import { callLLM, getProviderTelemetry } from "./services/llmRouter.js";
+import { query, isDbEnabled } from "./db.js";
+import { logger } from "./logger.js";
+
+// Initialize DB Tables
+async function initDb() {
+  if (!isDbEnabled()) return;
+
+  const createUsers = `
+    CREATE TABLE IF NOT EXISTS users (
+      id VARCHAR(128) PRIMARY KEY,
+      balance INTEGER DEFAULT 0,
+      last_grant_at TIMESTAMP,
+      reset_at VARCHAR(10) -- YYYY-MM-DD
+    );
+  `;
+
+  const createTx = `
+    CREATE TABLE IF NOT EXISTS transactions (
+      id VARCHAR(128) PRIMARY KEY,
+      user_id VARCHAR(128) REFERENCES users(id),
+      amount INTEGER NOT NULL,
+      type VARCHAR(32) NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      metadata JSONB
+    );
+  `;
+
+  try {
+    await query(createUsers);
+    await query(createTx);
+    logger.info('[DB] Tables initialized');
+  } catch (err) {
+    logger.error('[DB] Failed to initialize tables', { error: err.message });
+  }
+}
+
+initDb();
 
 const app = express();
 const PERSONA_ENGINE_URL = process.env.PERSONA_ENGINE_URL || "http://localhost:4105";
@@ -46,7 +83,7 @@ const PUBLIC_BFF_URL = (
 const PUBLIC_UI_URL = (process.env.PUBLIC_UI_URL || UI_URL).replace(/\/+$/, "");
 const STARTED_AT = new Date();
 
-console.log(
+logger.info(
   `[BOOT] mini-bff starting | build=${BUILD_ID} | port=${PORT} | self=${SELF_ORIGIN} | public=${PUBLIC_BFF_URL} | ui=${PUBLIC_UI_URL}`,
 );
 
@@ -60,19 +97,19 @@ function logProviderEnvState() {
     OPENAI_MODEL: process.env.OPENAI_MODEL ? "set" : "(unset)",
     OPENAI_API_KEY: process.env.OPENAI_API_KEY ? "set" : "(unset)",
   };
-  console.log("[ENV] provider configuration", summary);
+  logger.info("[ENV] provider configuration", summary);
   if (!process.env.PROVIDER) {
-    console.warn("[ENV] PROVIDER is not set. LLM routing will fail until it is configured.");
+    logger.warn("[ENV] PROVIDER is not set. LLM routing will fail until it is configured.");
   }
   if (provider === "GEMINI") {
     if (!process.env.GEMINI_MODEL) {
-      console.warn("[ENV] GEMINI_MODEL is not defined. Using fallback value (if any).");
+      logger.warn("[ENV] GEMINI_MODEL is not defined. Using fallback value (if any).");
     }
     if (!process.env.GEMINI_API_KEY) {
-      console.warn("[ENV] GEMINI_API_KEY is not defined. Gemini calls will fail.");
+      logger.warn("[ENV] GEMINI_API_KEY is not defined. Gemini calls will fail.");
     }
-    console.info("[ENV] GEMINI_MODEL value", process.env.GEMINI_MODEL || "(unset)");
-    console.info("[ENV] GEMINI_ENDPOINT value", process.env.GEMINI_ENDPOINT || "(default)");
+    logger.info("[ENV] GEMINI_MODEL value", process.env.GEMINI_MODEL || "(unset)");
+    logger.info("[ENV] GEMINI_ENDPOINT value", process.env.GEMINI_ENDPOINT || "(default)");
   }
 }
 
@@ -83,11 +120,11 @@ function isTestUserRequest(req) {
 }
 
 process.on("unhandledRejection", (reason) => {
-  console.error("[FATAL] Unhandled promise rejection", reason);
+  logger.critical("[FATAL] Unhandled promise rejection", { reason });
 });
 
 process.on("uncaughtException", (error) => {
-  console.error("[FATAL] Uncaught exception", error);
+  logger.critical("[FATAL] Uncaught exception", { error });
 });
 
 function routeExists(pathname, method = "get") {
@@ -324,9 +361,9 @@ async function saveWalletStore(wallet) {
     fsSync.writeFileSync(tempPath, payload);
     fsSync.renameSync(tempPath, WALLET_FILE);
     walletCache = wallet;
-    console.log(`[WALLET] persisted wallet store -> ${WALLET_FILE}`);
+    logger.info(`[WALLET] persisted wallet store -> ${WALLET_FILE}`);
   } catch (error) {
-    console.error("[WALLET] failed to persist wallet store", error);
+    logger.error("[WALLET] failed to persist wallet store", { error });
     try {
       if (fsSync.existsSync(tempPath)) {
         fsSync.rmSync(tempPath, { force: true });
@@ -349,16 +386,16 @@ async function readWalletFromDisk() {
     if (!parsed.users || typeof parsed.users !== "object") {
       parsed.users = {};
     }
-    console.log(`[WALLET] loaded wallet store -> ${WALLET_FILE}`);
+    logger.info(`[WALLET] loaded wallet store -> ${WALLET_FILE}`);
     return parsed;
   } catch (error) {
     if (error && typeof error === "object" && error.code === "ENOENT") {
-      console.warn("[WALLET] wallet store missing. Creating default ledger...");
+      logger.warn("[WALLET] wallet store missing. Creating default ledger...");
       const fallback = createWalletStore(getTodayUtcDate(), { includeAdmin: true });
       await saveWalletStore(fallback);
       return fallback;
     }
-    console.error("[WALLET] wallet store corrupt or unreadable. Rebuilding...", error?.message || error);
+    logger.error("[WALLET] wallet store corrupt or unreadable. Rebuilding...", { error: error?.message || error });
     const fallback = createWalletStore(getTodayUtcDate(), { includeAdmin: false });
     await saveWalletStore(fallback);
     return fallback;
@@ -393,7 +430,7 @@ function applyDailyResetIfNeeded(userId, record, today) {
     record.lastGrantAt = today;
     ensureTransactionsMap(record);
     pruneTransactions(record);
-    console.log(`[WALLET] daily reset applied for ${userId} -> ${allowance}pt`);
+    logger.info(`[WALLET] daily reset applied for ${userId} -> ${allowance}pt`);
     return true;
   }
   ensureTransactionsMap(record);
@@ -408,7 +445,7 @@ function ensureUserRecord(wallet, userId, today) {
       transactions: {},
       lastGrantAt: today,
     };
-    console.log(`[WALLET] created ledger for ${userId}`);
+    logger.info(`[WALLET] created ledger for ${userId}`);
     return { record: wallet.users[userId], created: true, reset: false };
   }
   const record = wallet.users[userId];
@@ -450,6 +487,43 @@ async function loadWalletStore() {
 }
 
 async function getWalletForUser(userId) {
+  // DB Mode
+  if (isDbEnabled()) {
+    try {
+      const res = await query('SELECT * FROM users WHERE id = $1', [userId]);
+      let record = res.rows[0];
+      const today = getTodayUtcDate();
+
+      if (!record) {
+        // Create new user
+        const allowance = getAllowanceForUser(userId);
+        await query(
+          'INSERT INTO users (id, balance, last_grant_at, reset_at) VALUES ($1, $2, NOW(), $3)',
+          [userId, allowance, today]
+        );
+        record = { id: userId, balance: allowance, reset_at: today };
+        logger.info(`[WALLET] created ledger for ${userId}`);
+      } else {
+        // Check daily reset
+        if (record.reset_at !== today) {
+          const allowance = getAllowanceForUser(userId);
+          await query(
+            'UPDATE users SET balance = $1, reset_at = $2, last_grant_at = NOW() WHERE id = $3',
+            [allowance, today, userId]
+          );
+          record.balance = allowance;
+          record.reset_at = today;
+          logger.info(`[WALLET] daily reset applied for ${userId} -> ${allowance}pt`);
+        }
+      }
+      return { wallet: null, record }; // wallet object not needed in DB mode
+    } catch (err) {
+      logger.error('[WALLET] DB error in getWalletForUser', { error: err.message });
+      throw err;
+    }
+  }
+
+  // File Mode (Fallback)
   const wallet = await loadWalletStore();
   const today = getTodayUtcDate();
   const { record, created, reset } = ensureUserRecord(wallet, userId, today);
@@ -465,6 +539,44 @@ async function grantPointsToUser(userId, amount, transactionId, source = "system
     error.status = 400;
     throw error;
   }
+
+  // DB Mode
+  if (isDbEnabled()) {
+    try {
+      // Ensure user exists and get current balance
+      const { record } = await getWalletForUser(userId);
+
+      if (transactionId) {
+        // Check duplicate tx
+        const txRes = await query('SELECT id FROM transactions WHERE id = $1', [transactionId]);
+        if (txRes.rowCount > 0) {
+          const error = new Error("duplicate_transaction");
+          error.status = 409;
+          throw error;
+        }
+        // Record tx
+        await query(
+          'INSERT INTO transactions (id, user_id, amount, type, metadata) VALUES ($1, $2, $3, $4, $5)',
+          [transactionId, userId, amount, 'grant', { source }]
+        );
+      }
+
+      // Update balance
+      const updateRes = await query(
+        'UPDATE users SET balance = balance + $1, last_grant_at = NOW() WHERE id = $2 RETURNING balance',
+        [amount, userId]
+      );
+      const newBalance = updateRes.rows[0].balance;
+
+      logger.info(`[WALLET] grant ${amount}pt to ${userId} (tx:${transactionId || "manual"}) via ${source}`, { userId, amount, source });
+      return newBalance;
+    } catch (err) {
+      logger.error('[WALLET] DB error in grantPointsToUser', { error: err.message });
+      throw err;
+    }
+  }
+
+  // File Mode
   const { wallet, record } = await getWalletForUser(userId);
   ensureTransactionsMap(record);
   if (transactionId) {
@@ -479,7 +591,7 @@ async function grantPointsToUser(userId, amount, transactionId, source = "system
   record.balance += amount;
   record.lastGrantAt = new Date().toISOString();
   await saveWalletStore(wallet);
-  console.log(`[WALLET] grant ${amount}pt to ${userId} (tx:${transactionId || "manual"}) via ${source}`);
+  logger.info(`[WALLET] grant ${amount}pt to ${userId} (tx:${transactionId || "manual"}) via ${source}`);
   return record.balance;
 }
 
@@ -489,6 +601,58 @@ async function consumePointsFromUser(userId, amount, metadata = {}) {
     error.status = 400;
     throw error;
   }
+
+  // DB Mode
+  if (isDbEnabled()) {
+    try {
+      const { record } = await getWalletForUser(userId);
+      if (record.balance < amount) {
+        const error = new Error("insufficient_balance");
+        error.status = 400;
+        error.balance = record.balance;
+        throw error;
+      }
+
+      const idempotencyKey =
+        typeof metadata.idempotencyKey === "string" && metadata.idempotencyKey.trim().length > 0
+          ? metadata.idempotencyKey.trim()
+          : null;
+
+      if (idempotencyKey) {
+        // Check duplicate tx
+        const txRes = await query('SELECT id FROM transactions WHERE id = $1', [idempotencyKey]);
+        if (txRes.rowCount > 0) {
+          const error = new Error("duplicate_consume");
+          error.status = 409;
+          error.balance = record.balance;
+          throw error;
+        }
+        // Record tx
+        await query(
+          'INSERT INTO transactions (id, user_id, amount, type, metadata) VALUES ($1, $2, $3, $4, $5)',
+          [idempotencyKey, userId, amount, 'consume', metadata]
+        );
+      }
+
+      // Update balance
+      const updateRes = await query(
+        'UPDATE users SET balance = balance - $1 WHERE id = $2 RETURNING balance',
+        [amount, userId]
+      );
+      const newBalance = updateRes.rows[0].balance;
+
+      logger.info(
+        `[WALLET] consume ${amount}pt from ${userId} (sku:${metadata.sku || "unknown"}) balance:${newBalance}`,
+        { userId, amount, sku: metadata.sku }
+      );
+      return newBalance;
+    } catch (err) {
+      logger.error('[WALLET] DB error in consumePointsFromUser', { error: err.message });
+      throw err;
+    }
+  }
+
+  // File Mode
   const { wallet, record } = await getWalletForUser(userId);
   if (record.balance < amount) {
     const error = new Error("insufficient_balance");
@@ -513,8 +677,8 @@ async function consumePointsFromUser(userId, amount, metadata = {}) {
   }
   record.balance -= amount;
   await saveWalletStore(wallet);
-  console.log(
-    `[WALLET] consume ${amount}pt from ${userId} (sku:${metadata.sku || "unknown"}) balance:${record.balance}`,
+  logger.info(
+    `[WALLET] consume ${amount}pt from ${userId} (sku:${metadata.sku || "unknown"}) balance:${record.balance}`
   );
   return record.balance;
 }
@@ -732,14 +896,14 @@ async function saveProviderConfig(config, options = {}) {
   await fs.mkdir(path.dirname(PROVIDER_FILE), { recursive: true });
   await fs.writeFile(PROVIDER_FILE, JSON.stringify(sanitized, null, 2));
   if (updateEnv) {
-    console.log(`[PROVIDER] configured => ${sanitized.provider}`);
+    logger.info(`[PROVIDER] configured => ${sanitized.provider}`);
   }
   return sanitized;
 }
 
 async function loadSoulCoreFiles() {
   if (!fsSync.existsSync(SOUL_CORE_DIR)) {
-    console.warn(`[SOUL_CORE] directory not found: ${SOUL_CORE_DIR}`);
+    logger.warn(`[SOUL_CORE] directory not found: ${SOUL_CORE_DIR}`);
     return [];
   }
   try {
@@ -760,7 +924,7 @@ async function loadSoulCoreFiles() {
     }
     return results;
   } catch (error) {
-    console.warn(`[SOUL_CORE] failed to read directory ${SOUL_CORE_DIR}:`, error);
+    logger.warn(`[SOUL_CORE] failed to read directory ${SOUL_CORE_DIR}:`, { error });
     return [];
   }
 }
@@ -805,10 +969,10 @@ async function loadPersona(cardId) {
         typeof parsed === "string"
           ? "raw-string"
           : parsed?.prompt
-          ? "prompt"
-          : parsed?.system
-          ? "system"
-          : "json",
+            ? "prompt"
+            : parsed?.system
+              ? "system"
+              : "json",
     };
   } catch {
     return null;
@@ -850,9 +1014,9 @@ function summarizePersonaData(personaData) {
 function buildPrompt({ soulCoreFiles, personaPrompt, personaData, userPrompt }) {
   const soulCoreText = Array.isArray(soulCoreFiles) && soulCoreFiles.length > 0
     ? soulCoreFiles
-        .map((file, index) => `### Soul Core ${index + 1}: ${file.name}
+      .map((file, index) => `### Soul Core ${index + 1}: ${file.name}
 ${file.content}`)
-        .join("\n\n")
+      .join("\n\n")
     : "";
   const instructions = [];
   instructions.push(
@@ -862,7 +1026,7 @@ ${file.content}`)
   if (personaData) {
     instructions.push(`【V2カード情報】
 ${personaSummary || JSON.stringify(personaData, null, 2)}`);
-  } 
+  }
   if (!personaData && personaPrompt) {
     instructions.push(`【参考ペルソナ情報】
 ${personaPrompt}`);
@@ -1155,8 +1319,8 @@ app.post("/wallet/redeem", async (req, res) => {
     typeof tx_id === "string" && TX_ID_REGEX.test(tx_id)
       ? tx_id
       : typeof transactionId === "string"
-      ? transactionId
-      : null;
+        ? transactionId
+        : null;
   try {
     if (isTestUser) {
       const { record } = await getWalletForUser(userId);
@@ -1226,8 +1390,8 @@ app.post("/wallet/consume", async (req, res) => {
     typeof idempotency_key === "string" && IDEMPOTENCY_REGEX.test(idempotency_key)
       ? idempotency_key
       : typeof idempotencyKey === "string" && IDEMPOTENCY_REGEX.test(idempotencyKey)
-      ? idempotencyKey
-      : null;
+        ? idempotencyKey
+        : null;
   try {
     if (isTestUser) {
       const { record } = await getWalletForUser(userId);
@@ -1316,21 +1480,27 @@ app.post("/paypal/ipn/notify", async (req, res) => {
     );
 
     try {
-      const balance = await grantPointsToUser(userId, amountPoints, txId || undefined, "paypal-ipn");
-      console.log(
-        `[IPN] granted ${amountPoints}pt to ${userId} (tx=${txId || "manual"}, balance=${balance})`,
-      );
+      logger.info(`[IPN] verified payment for ${userId} (tx:${txId})`);
+
+      // Grant points
+      try {
+        await grantPointsToUser(userId, amountPoints, txId, "paypal_ipn");
+      } catch (error) {
+        if (error.message === "duplicate_transaction") {
+          logger.warn("[IPN] duplicate transaction", { userId, txId });
+        } else {
+          throw error;
+        }
+      }
       return res.status(200).send("OK");
     } catch (error) {
-      if (error.message === "duplicate_transaction") {
-        console.warn("[IPN] duplicate transaction", { userId, txId });
-        return res.status(200).send("DUPLICATE");
-      }
-      console.error("[IPN] grant failed", error);
-      return res.status(500).send("ERROR");
+      logger.error("[IPN] grant failed", { error });
+      // Do not return 500 to PayPal if it's our internal error,
+      // but maybe we should? For now, log and return 200 to stop retries if it's logic error.
+      return res.status(200).send("ERROR");
     }
   } catch (error) {
-    console.error("[IPN] unexpected error", error);
+    logger.error("[IPN] unexpected error", { error });
     res.status(500).send("ERROR");
   }
 });
@@ -1487,7 +1657,7 @@ app.post("/admin/wallet/diagnostic", async (req, res) => {
         finalBalance = finalRecord.balance;
         reverted = true;
       } catch (revertError) {
-        console.warn("[DIAGNOSTIC] failed to revert wallet diagnostic grant", revertError);
+        logger.warn("[DIAGNOSTIC] failed to revert wallet diagnostic grant", { error: revertError });
       }
     } else {
       const { record: finalRecord } = await getWalletForUser(targetUserId);
@@ -1512,7 +1682,7 @@ app.post("/admin/wallet/diagnostic", async (req, res) => {
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
-    console.error("[DIAGNOSTIC] wallet diagnostic failed", error);
+    logger.error("[DIAGNOSTIC] wallet diagnostic failed", { error });
     const status = error.status || 500;
     res.status(status).json({ error: error.message || "wallet_diagnostic_failed" });
   }
@@ -1702,7 +1872,7 @@ app.post("/chat/v1", async (req, res) => {
   try {
     const soulCoreFiles = await loadSoulCoreFiles();
     if (!soulCoreFiles.length) {
-      console.warn("[SOUL_CORE] no markdown files loaded; proceeding without soul core context");
+      logger.warn("[SOUL_CORE] no markdown files loaded; proceeding without soul core context");
     }
     const cardId = typeof body.cardId === "string" && body.cardId.trim() ? body.cardId.trim() : null;
     const personaPayload = body.persona && typeof body.persona === "object" ? body.persona : null;
@@ -1719,7 +1889,7 @@ app.post("/chat/v1", async (req, res) => {
     const providerConfig = await loadProviderConfig();
     const result = await callLLM(finalPrompt, providerConfig);
     if (result?.error || !result?.reply) {
-      console.error("[CHAT] provider_error", {
+      logger.error("[CHAT] provider_error", {
         provider: result?.provider,
         model: result?.model,
         endpoint: result?.endpoint,
@@ -1764,7 +1934,7 @@ app.post("/chat/v1", async (req, res) => {
 });
 
 app.use((err, req, res, next) => {
-  console.error(`[ERROR] ${req.method} ${req.originalUrl}`, err);
+  logger.error(`[ERROR] ${req.method} ${req.originalUrl}`, { error: err });
   if (res.headersSent) {
     return next(err);
   }
@@ -1779,21 +1949,21 @@ app.use((err, req, res, next) => {
 
 loadProviderConfig()
   .then((config) => {
-    console.log(`[PROVIDER] active => ${config.provider}`);
+    logger.info(`[PROVIDER] active => ${config.provider}`);
   })
   .catch((error) => {
-    console.warn("[PROVIDER] failed to load configuration", error);
+    logger.warn("[PROVIDER] failed to load configuration", { error });
   });
 loadWalletStore()
   .then((wallet) => {
-    console.log(`[WALLET] ready (users=${Object.keys(wallet.users ?? {}).length})`);
+    logger.info(`[WALLET] ready (users=${Object.keys(wallet.users ?? {}).length})`);
   })
   .catch((error) => {
-    console.error("[WALLET] failed to initialize wallet store", error);
+    logger.error("[WALLET] failed to initialize wallet store", { error });
   });
 
 app.listen(PORT, () => {
-  console.log(`Mini BFF running on port ${PORT}`);
+  logger.info(`Mini BFF running on port ${PORT}`);
 });
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', time: Date.now() });
