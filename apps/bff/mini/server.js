@@ -1411,16 +1411,42 @@ app.post("/wallet/consume", async (req, res) => {
       userId,
       unit: "pt",
     });
-  } catch (error) {
-    console.error("[WALLET] consume failed", error);
-    const status = error.status || 500;
     res.status(status).json({
       error: error.message || "consume_failed",
       balance: error.balance,
     });
   }
 });
+    });
+  }
+});
 
+const protocolRouter = require('./protocol/router');
+
+// --- Protocol Relay Endpoint ---
+app.post('/protocol/:appName', async (req, res) => {
+  const { appName } = req.params;
+  const userId = req.headers['x-izk-uid'];
+
+  if (!userId) {
+    return res.status(400).json({ error: 'Missing X-IZK-UID header' });
+  }
+
+  try {
+    const result = await protocolRouter(appName, req.body, {
+      db,
+      logger,
+      userId,
+      consumePointsFromUser // Pass the function to handlers
+    });
+    res.json(result);
+  } catch (err) {
+    logger.error(`[Protocol] Error in ${appName}: ${err.message} `);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Legacy MetaCapture Endpoint (Deprecated but kept for compatibility) ---
 app.post("/api/v2/metacapture_link", async (req, res) => {
   const userId = requireUserId(req, res);
   if (!userId) return;
