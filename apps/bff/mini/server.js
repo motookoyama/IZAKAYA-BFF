@@ -1421,6 +1421,47 @@ app.post("/wallet/consume", async (req, res) => {
   }
 });
 
+app.post("/api/v2/metacapture_link", async (req, res) => {
+  const userId = requireUserId(req, res);
+  if (!userId) return;
+
+  const { content, mode, auto } = req.body ?? {};
+  const COST = 50;
+  const SATELLITE_BASE_URL = "https://metacapture-2-0-95139013565.us-west1.run.app";
+
+  try {
+    // 1. Consume Points
+    await consumePointsFromUser(userId, COST, { sku: "metacapture_v2_launch" });
+
+    // 2. Generate URL
+    const params = new URLSearchParams();
+    if (mode) params.append("mode", mode);
+    if (content) params.append("content", content);
+    if (auto) params.append("auto", "true");
+
+    // Add return URL (optional, if supported by MetaCapture in future)
+    // params.append("callback", PUBLIC_UI_URL);
+
+    const url = `${SATELLITE_BASE_URL}/?${params.toString()}`;
+
+    logger.info(`[METACAPTURE] link generated for ${userId} (mode:${mode})`);
+
+    res.json({
+      ok: true,
+      url,
+      cost: COST
+    });
+
+  } catch (error) {
+    logger.error("[METACAPTURE] link generation failed", { error });
+    const status = error.status || 500;
+    res.status(status).json({
+      error: error.message || "link_generation_failed",
+      balance: error.balance
+    });
+  }
+});
+
 app.get("/wallet/pricing", async (_req, res) => {
   try {
     const table = await loadPricingTable();
