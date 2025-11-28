@@ -118,6 +118,7 @@ Docker Desktop に停止済みコンテナが表示されたままでも、こ�
 - `POST /wallet/redeem` … `amount_pt` と `tx_id` でポイント加算。冪等性チェックあり。
 - `POST /wallet/consume` … `amount_pt`, `sku`, `idempotency_key`。残高不足時は 402。
 - `POST /paypal/ipn/notify` … PayPal IPN を検証し、成功/失敗に関わらず台帳へ追記。
+- `POST /protocol/:appName` … 衛星アプリ連携用ハブ。詳細は [PROTOCOL_RELAY_ARCHITECTURE.md](PROTOCOL_RELAY_ARCHITECTURE.md) を参照。
 
 詳細は `docs/` 配下の仕様書および `RUNBOOK.md` を参照してください。
 
